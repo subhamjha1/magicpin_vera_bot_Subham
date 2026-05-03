@@ -1366,13 +1366,30 @@ def _parse_yes_no_intent(message: str) -> str:
                     return True
         return False
 
-    negative_tokens = ["no", "nope", "nah", "stop", "not now", "don't", "dont",
-                       "nahin", "nahi", "not interested", "mat", "band karo",
-                       "cancel", "not ok", "not okay"]
-    positive_tokens = ["yes", "sure", "okay", "ok", "please", "confirm", "draft",
+    # HARD-STOP tokens — these ALWAYS return negative regardless of other words present.
+    # "please cancel my booking" must be negative, not neutral.
+    hard_stop_tokens = ["cancel", "stop", "not now", "not interested", "band karo",
+                        "nahin", "nahi", "don't", "dont", "mat"]
+
+    def _has_hard_stop(text: str) -> bool:
+        for tok in hard_stop_tokens:
+            if len(tok) <= 3:
+                if re.search(r"\b" + re.escape(tok) + r"\b", text):
+                    return True
+            else:
+                if tok in text:
+                    return True
+        return False
+
+    negative_tokens = ["no", "nope", "nah", "not ok", "not okay"]
+    positive_tokens = ["yes", "sure", "okay", "ok", "confirm", "draft",
                        "haan", "ha", "bilkul", "zaroor", "got it", "proceed"]
     wait_tokens     = ["later", "remind", "kal", "baad mein", "wait", "hold on",
                        "thodi der", "abhi nahi"]
+
+    # Hard-stop check first — always wins
+    if _has_hard_stop(lower):
+        return "negative"
 
     has_negative = _matches(negative_tokens, lower)
     has_positive = _matches(positive_tokens, lower)
@@ -1407,31 +1424,28 @@ def _is_auto_reply(message: str, history: List[Dict[str, Any]]) -> bool:
 def _extract_slot(message: str) -> str:
     """
     Pull the ENTIRE date/time slot string from a message verbatim.
+    Captures prefix words like 'next', 'this', 'coming' before the day.
 
     Handles all these correctly:
-      'Monday 6pm'            → 'Monday 6pm'       (weekday + compact time)
-      'Monday 6 pm'           → 'Monday 6 pm'       (weekday + spaced time)
-      'Friday 10:30 am'       → 'Friday 10:30 am'
-      'Wed 5 Nov, 6pm'        → 'Wed 5 Nov, 6pm'
-      'tomorrow at 10 am'     → 'tomorrow at 10 am'
-      'Saturday morning'      → 'Saturday morning'
-      '1 for Wed 5 Nov, 6pm'  → 'Wed 5 Nov, 6pm'
-
-    Root cause of the original bug: the "weekday + digit" pattern (Pattern B)
-    was consuming "6" as a day-of-month, then failing to attach "pm" because
-    there was no separator between the digit and "pm".  The fix promotes the
-    compact "weekday + HH[am|pm]" pattern to highest priority.
+      'next Sunday at 11 am sharp'  → 'next Sunday at 11 am sharp'
+      'this Saturday morning'       → 'this Saturday morning'
+      'Monday 6pm'                  → 'Monday 6pm'
+      'Wed 5 Nov, 6pm'              → 'Wed 5 Nov, 6pm'
+      'tomorrow at 10 am'           → 'tomorrow at 10 am'
+      '1 for Wed 5 Nov, 6pm'        → 'Wed 5 Nov, 6pm'
     """
+    # Optional prefix: next / this / coming / this coming
+    _prefix = r"(?:(?:next|this|coming|this\s+coming)\s+)?"
     _days   = (r"(?:mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:rs(?:day)?)?|"
                r"fri(?:day)?|sat(?:urday)?|sun(?:day)?|tomorrow|today|tonight)")
     _months = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
                r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
-    # Time: HH:MM am/pm  |  HH am/pm  |  HHam/pm (no space)  |  morning etc.
+    # Time: HH:MM am/pm | HH am/pm | HHam/pm | morning/sharp etc.
     _time   = r"(?:\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?(?:\s+(?:sharp|exactly|on the dot))?|morning|afternoon|evening|night)"
 
     # ── Priority 0: "N for <slot>" ──────────────────────────────────────────
     pat_nfor = re.compile(
-        r"\b\d\s+for\s+("
+        r"\b\d\s+for\s+(" + _prefix
         + _days
         + r"(?:[\s,]+\d{1,2})?"
         + r"(?:[\s,]+" + _months + r")?"
@@ -1442,29 +1456,24 @@ def _extract_slot(message: str) -> str:
     if m_nfor:
         return m_nfor.group(1).strip().rstrip(",")
 
-    # ── Priority 1: weekday + compact/spaced time (NO day-of-month) ─────────
-    # e.g. "Monday 6pm", "Friday 10:30 am", "Wednesday, 4 pm"
-    # Must be tried BEFORE the date pattern so "6pm" is parsed as a time,
-    # not "6" as day-of-month with orphaned "pm".
+    # ── Priority 1: prefix + weekday + time (no day-of-month) ───────────────
+    # e.g. "next Sunday at 11 am sharp", "this Saturday morning", "Monday 6pm"
     pat_day_time = re.compile(
-        _days + r"[,\s]+(?:at\s+)?" + _time,
+        _prefix + _days + r"[,\s]+(?:at\s+)?" + _time,
         re.IGNORECASE,
     )
-    # We only accept this match when it contains an am/pm marker OR
-    # a time-of-day word — prevents "Monday 5" being returned without am/pm.
     m_dt = pat_day_time.search(message)
     if m_dt:
         candidate = m_dt.group(0).strip().rstrip(",")
-        # Accept if the candidate actually ends with am/pm or tod-word
-        if re.search(r"[ap]\.?m\.?$|(?:morning|afternoon|evening|night)$",
+        if re.search(r"[ap]\.?m\.?$|(?:morning|afternoon|evening|night|sharp|exactly)$",
                      candidate, re.IGNORECASE):
             return candidate
 
-    # ── Priority 2: weekday + day-of-month + optional month + optional time ─
-    # e.g. "Wed 5 Nov, 6pm", "Thu 6 Nov 5pm", "Sat 12"
-    # The time separator is now [,\s]* (zero-or-more) so "5pm" attaches.
+    # ── Priority 2: prefix + weekday + day-of-month + optional month + time ─
+    # e.g. "Wed 5 Nov, 6pm", "next Thu 6 Nov 5pm"
     pat_full = re.compile(
-        _days
+        _prefix
+        + _days
         + r"[\s,]+\d{1,2}"
         + r"(?:[\s,]+" + _months + r")?"
         + r"(?:[,\s]*(?:at\s+)?" + _time + r")?",
@@ -1474,9 +1483,9 @@ def _extract_slot(message: str) -> str:
     if m_full:
         return m_full.group(0).strip().rstrip(",")
 
-    # ── Priority 3: time-of-day word only after weekday ─────────────────────
+    # ── Priority 3: prefix + weekday + time-of-day word ─────────────────────
     pat_tod = re.compile(
-        _days + r"[\s,]+(?:morning|afternoon|evening|night)",
+        _prefix + _days + r"[\s,]+(?:morning|afternoon|evening|night)",
         re.IGNORECASE,
     )
     m_tod = pat_tod.search(message)
@@ -1484,8 +1493,7 @@ def _extract_slot(message: str) -> str:
         return m_tod.group(0).strip()
 
     # ── Priority 3b: bare weekday / relative day alone ───────────────────────
-    # e.g. "please confirm saturday", "book me for monday"
-    pat_bare_day = re.compile(r"\b" + _days + r"\b", re.IGNORECASE)
+    pat_bare_day = re.compile(_prefix + r"\b" + _days + r"\b", re.IGNORECASE)
     m_bd = pat_bare_day.search(message)
     if m_bd:
         return m_bd.group(0).strip()
