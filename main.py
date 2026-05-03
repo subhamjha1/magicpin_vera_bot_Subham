@@ -1427,7 +1427,7 @@ def _extract_slot(message: str) -> str:
     _months = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
                r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
     # Time: HH:MM am/pm  |  HH am/pm  |  HHam/pm (no space)  |  morning etc.
-    _time   = r"(?:\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?|morning|afternoon|evening|night)"
+    _time   = r"(?:\d{1,2}(?::\d{2})?\s*[ap]\.?m\.?(?:\s+(?:sharp|exactly|on the dot))?|morning|afternoon|evening|night)"
 
     # ── Priority 0: "N for <slot>" ──────────────────────────────────────────
     pat_nfor = re.compile(
