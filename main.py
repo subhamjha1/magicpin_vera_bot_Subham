@@ -1,28 +1,30 @@
 """
-magicpin Vera Deterministic Engine — main.py  (v5.0.0)
+magicpin Vera Deterministic Engine — main.py  (v5.2.0)
 =======================================================
-v5.0.0 — Perfect-score refactor.  Five surgical fixes over v4.1:
+v5.2.0 — Two surgical fixes over v5.0.0 (Fixes F & G):
 
-  A. _extract_slot()         — captures the ENTIRE date/time string verbatim
-                               so zero-loss slot echoing works in every reply.
-  B. _pct_str() + _safe_num()— zero-guard helpers: never emit "0%" or "0 calls";
-                               fall back to professional phrases instead.
-  C. Regulation priority     — "regulation" / "reg_change" are checked BEFORE
-                               "recall" / "recall_due" in trigger-inference rules
-                               so regulation triggers NEVER become perf_dip.
-  D. CTA stakes & urgency    — every category composer ends with a specific
-                               consequence or deadline, not a bare "Reply YES".
-  E. State guard             — handle_reply() returns action=end immediately
-                               when conversation.state == "closed"; eliminates
-                               zombie responses that could confuse the judge.
+  F. Intent-over-booking guard  — _handle_customer_reply now evaluates
+                                   intent == "negative" (and the new module-level
+                                   _message_has_hard_stop helper) AFTER the wait
+                                   check but BEFORE is_booking is computed.
+                                   Previously, "Please cancel my booking" set
+                                   is_booking=True ("book" ⊂ "booking") and
+                                   bypassed the negative-intent branch, returning
+                                   action='send'.  Now cancel/stop always → end.
 
-Preserved from v4.1:
-  - Per-trigger-per-category composers, real-number injection.
-  - Multi-strategy merchant ID resolution (exact → prefix → substring).
-  - Customer context hydration for recall / refill / lapsed triggers.
-  - Versioned dedup, _synthesize_trigger_payload, _infer_category_from_trigger_id.
-  - UUID randomisation on every conversation_id (uuid4().hex[:8]).
-  - _category_role_name() helper used in all customer booking confirmations.
+  G. Cancel guard in closed/unknown conv blocks  — handle_reply's closed-conv
+                                   and conversation-not-found recovery paths both
+                                   call _message_has_hard_stop before the slot/
+                                   keyword scan, so cancel messages on those paths
+                                   also return action='end' rather than a booking
+                                   confirmation.
+
+v5.0.0 fixes (preserved unchanged):
+  A. _extract_slot()         — full verbatim date/time capture (zero-loss echo).
+  B. _pct_str() / _safe_num()— zero-guard helpers.
+  C. Regulation priority     — reg triggers never mis-classified as perf_dip.
+  D. CTA stakes & urgency    — every composer ends with a consequence/deadline.
+  E. State guard             — closed-conv zombie-response blocker.
 """
 
 import re
@@ -1349,6 +1351,32 @@ def compose_actions_for_tick(request: TickRequest, now: datetime) -> List[Dict[s
 
 
 # ---------------------------------------------------------------------------
+# Hard-stop token check — reused in _handle_customer_reply AND handle_reply.
+# Must mirror the token list in _parse_yes_no_intent exactly.
+# ---------------------------------------------------------------------------
+_HARD_STOP_TOKENS = [
+    "cancel", "stop", "not now", "not interested",
+    "band karo", "nahin", "nahi", "don't", "dont", "mat",
+]
+
+def _message_has_hard_stop(message: str) -> bool:
+    """
+    Return True when the lowercased message contains any hard-stop token.
+    Short tokens (≤3 chars) require a word boundary; longer tokens are
+    substring-matched (same logic as _parse_yes_no_intent).
+    """
+    lower = message.lower()
+    for tok in _HARD_STOP_TOKENS:
+        if len(tok) <= 3:
+            if re.search(r"\b" + re.escape(tok) + r"\b", lower):
+                return True
+        else:
+            if tok in lower:
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Reply intent parsing & handling
 # ---------------------------------------------------------------------------
 
@@ -1672,7 +1700,22 @@ def _handle_customer_reply(
     _cat_slug  = _resolve_category(merchant_payload, {})
     _role_name = _category_role_name(_cat_slug)
 
-    if intent == "negative":
+    if intent == "wait":
+        return {
+            "action": "wait",
+            "body": _truncate_body(f"Of course! Take your time. Reply here whenever you're ready to book."),
+            "wait_seconds": 900,
+            "rationale": "Customer asked to wait; backing off 15 minutes.",
+        }
+
+    # INTENT-OVER-BOOKING GUARD (Fix F)
+    # Must run BEFORE is_booking is evaluated.  "Please cancel my booking" contains
+    # the substring "book", which would set is_booking=True and return action='send'.
+    # Checking intent (already resolved by _parse_yes_no_intent via hard-stop tokens)
+    # here guarantees cancel/stop always produces action='end', regardless of other
+    # words in the message.  _message_has_hard_stop is a belt-and-suspenders check
+    # for any path that bypasses _parse_yes_no_intent.
+    if intent == "negative" or _message_has_hard_stop(message):
         ctx_store.close_conversation(conversation_id)
         return {
             "action": "end",
@@ -1680,15 +1723,7 @@ def _handle_customer_reply(
                 f"No problem at all! If you change your mind, "
                 f"feel free to reach out to {sn} directly. Have a great day!"
             ),
-            "rationale": "Customer declined; polite closing sent.",
-        }
-
-    if intent == "wait":
-        return {
-            "action": "wait",
-            "body": _truncate_body(f"Of course! Take your time. Reply here whenever you're ready to book."),
-            "wait_seconds": 900,
-            "rationale": "Customer asked to wait; backing off 15 minutes.",
+            "rationale": "Customer cancelled/declined; intent-over-booking guard fired; action=end.",
         }
 
     # FIX A: extract the full verbatim slot string from the customer's message
@@ -1774,8 +1809,19 @@ def handle_reply(ctx_store: ContextStore, request: Dict[str, Any]) -> Dict[str, 
     # If customer sends a slot pick on a closed convo, still confirm it.
     if conversation is not None and conversation.get("state") == "closed":
         _msg_closed = request.get("message", "")
-        _slot_closed = _extract_slot(_msg_closed)
         _lower_closed = _msg_closed.lower()
+
+        # Fix G — cancel guard on closed conv.
+        # "Please cancel my booking" must return action='end', not a booking confirm.
+        if from_role == "customer" and _message_has_hard_stop(_msg_closed):
+            return {
+                "action": "end",
+                "body": "Cancellation noted. If you ever need to rebook, we're always here — have a great day!",
+                "cta": "yes",
+                "rationale": "Customer cancel/stop on closed conversation; action=end.",
+            }
+
+        _slot_closed = _extract_slot(_msg_closed)
         _is_slot_closed = _slot_closed or any(w in _lower_closed for w in (
             "book", "schedule", "appointment", "confirm",
             "wed", "thu", "fri", "sat", "sun", "pm", "am", "nov", "dec", "yes", "please"
@@ -1809,8 +1855,18 @@ def handle_reply(ctx_store: ContextStore, request: Dict[str, Any]) -> Dict[str, 
     if conversation is None:
         # Conversation not found — graceful recovery for slot/booking messages
         message_preview = request.get("message", "")
-        slot = _extract_slot(message_preview)
         lower_preview = message_preview.lower()
+
+        # Fix G — cancel guard on unknown conv; same rule applies.
+        if from_role == "customer" and _message_has_hard_stop(message_preview):
+            return {
+                "action": "end",
+                "body": "Cancellation noted. If you ever need to book again, we're happy to help!",
+                "cta": "yes",
+                "rationale": "Customer cancel/stop on unknown conversation; action=end.",
+            }
+
+        slot = _extract_slot(message_preview)
         is_slot_msg = slot or any(w in lower_preview for w in (
             "book", "schedule", "appointment", "please", "confirm",
             "wed", "thu", "fri", "sat", "sun", "pm", "am", "nov", "dec", "yes"
@@ -1912,18 +1968,17 @@ def metadata() -> Dict[str, Any]:
     return {
         "team_name": "Shubham Jha",
         "team_members": ["Shubham Jha"],
-        "model": "vera-deterministic-v5.1",
+        "model": "vera-deterministic-v5.2",
         "approach": (
-            "System-prompt-aligned deterministic engine. "
+            "Deterministic engine aligned to system-prompt rules. "
             "Role names: Our trainer (gyms), Our stylist (salons), Our specialist (dentists), Our pro team (default). "
-            "Zero-data fallback: 'significant surge in local searches' with scarcity hooks. "
-            "Slot capture: full verbatim echo via multi-priority regex. "
-            "action=end only on STOP/CANCEL/negative intent — never on slot or neutral messages. "
-            "UUID4 per conversation_id for replay safety. "
-            "Scarcity phrase 'Before competitors capture this traffic' in all perf triggers."
+            "Slot capture: full verbatim echo via multi-priority regex (_extract_slot). "
+            "Intent-over-booking: module-level _message_has_hard_stop checked before is_booking in all three "
+            "reply paths (open conv, closed conv, unknown conv) — cancel/stop always → action=end. "
+            "UUID4 per conversation_id. Scarcity hook 'Before competitors capture this traffic' in all perf triggers."
         ),
         "contact_email": "subhamjha282@gmail.com",
-        "version": "5.1.0",
+        "version": "5.2.0",
         "submitted_at": _SUBMITTED_AT,
     }
 
