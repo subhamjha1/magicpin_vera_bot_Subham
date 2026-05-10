@@ -1,7 +1,7 @@
 # magicpin Vera — Deterministic Outreach Engine
 
-**Live API:** https://magicpin-vera-challenge.onrender.com  
-**Swagger Docs:** https://magicpin-vera-challenge.onrender.com/docs  
+**Live API:** https://magicpin-vera-bot-subham.onrender.com/  
+**Swagger Docs:** https://magicpin-vera-bot-subham.onrender.com/docs 
 **Submission by:** Subham Jha · subhamjha282@gmail.com
 
 ---
