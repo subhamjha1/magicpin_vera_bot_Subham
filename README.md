@@ -1,27 +1,24 @@
-# magicpin Vera Deterministic Engine
+Run and fix this complete Next.js project automatically.
 
-## Approach
-This service uses a deterministic rule-based engine rather than a generative model. It maps merchant, customer, category, and trigger context into concise, category-specific outreach messages with a controlled tone and one low-effort CTA.
+Tasks:
+1. Install all dependencies
+2. Fix all compile errors
+3. Fix TypeScript errors
+4. Fix image rendering issues
+5. Fix broken imports
+6. Fix next.config.js
+7. Fix authentication flow
+8. Fix booking redirects
+9. Fix responsive issues
+10. Fix all runtime errors
+11. Optimize performance
+12. Ensure production build succeeds
 
-## Key Features
-- Version-controlled context updates for `merchant`, `customer`, `trigger`, and `category` scopes.
-- Stateful in-memory store that tracks conversation state and deduplicates processed triggers.
-- Deterministic action generation: every `/v1/tick` response is driven by exact dataset values and business rules.
-- Category-specific tone: messages adapt voice and urgency based on merchant category metadata.
+Then:
+- run npm install
+- run npm run build
+- fix all errors until build succeeds
+- run npm run dev
 
-## Deployment
-- `Dockerfile` is configured with `CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "10000"]`.
-- Runtime dependencies are captured in `requirements.txt`:
-  - `fastapi`
-  - `pydantic>=2.0.0`
-  - `uvicorn`
-
-## Scoring and Prioritization
-- Merchant performance metrics are used to prioritize actions when a trigger indicates a drop in calls, views, or CTR.
-- Locality and city context are incorporated into urgency framing, making messages more relevant to nearby customers.
-- Actions are built to favour low-friction CTAs and exact merchant data such as offers, city, and owner name.
-
-## Readiness
-- `/v1/metadata` returns `team_name: magicpin Vera Engine`.
-- `/v1/healthz` returns a robust health payload with status, uptime, and loaded context counts.
-- The codebase is ready for a final Git push to Render or GitHub.
+Finally:
+Provide the fully working production-ready codebase with all fixes applied.
